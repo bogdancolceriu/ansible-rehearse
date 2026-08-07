@@ -1,0 +1,49 @@
+---
+# Demo playbook used for the README screenshot and for trying out rehearse:
+#   rehearse run examples/webserver.yml --systemd
+- name: Provision web server
+  hosts: webservers
+  become: true
+  vars:
+    app_user: webapp
+  tasks:
+    - name: Install nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+        update_cache: true
+
+    - name: Create the application user
+      ansible.builtin.user:
+        name: "{{ app_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+
+    - name: Deploy the site configuration
+      ansible.builtin.template:
+        src: templates/site.conf.j2
+        dest: /etc/nginx/conf.d/site.conf
+        mode: "0644"
+      notify: Reload nginx
+
+    - name: Remove the default site
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Record the deployment (--check would silently skip this)
+      ansible.builtin.shell: date -u +%Y-%m-%d > /etc/deploy-stamp
+      args:
+        creates: /etc/deploy-stamp
+
+    - name: Enable and start nginx
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: true
+
+  handlers:
+    - name: Reload nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
