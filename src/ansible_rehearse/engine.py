@@ -58,17 +58,23 @@ class ContainerEngine:
     ) -> subprocess.CompletedProcess[str]:
         cmd = [self.binary, *args]
         try:
-            proc = subprocess.run(
+            # Binary pipes on purpose: Windows text mode would rewrite "\n" to
+            # "\r\n" on stdin, and CRLF corrupts shell scripts piped into the
+            # container ("set: Illegal option -").
+            raw = subprocess.run(
                 cmd,
                 capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                input=input_text,
+                input=input_text.encode("utf-8") if input_text is not None else None,
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired as exc:
             raise EngineError(f"'{self.name} {args[0]}' timed out after {timeout}s") from exc
+        proc = subprocess.CompletedProcess(
+            args=cmd,
+            returncode=raw.returncode,
+            stdout=raw.stdout.decode("utf-8", errors="replace"),
+            stderr=raw.stderr.decode("utf-8", errors="replace"),
+        )
         if check and proc.returncode != 0:
             raise EngineError(
                 f"'{self.name} {' '.join(args[:3])}...' failed (rc={proc.returncode})",

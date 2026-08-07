@@ -51,36 +51,45 @@ class RunConfig:
     ansible_args: list[str] = field(default_factory=list)
 
 
-def parse_play_json(stdout: str) -> tuple[list[TaskRecord], dict[str, Any] | None]:
-    """Parse the output of ANSIBLE_STDOUT_CALLBACK=json into task records."""
-    text = stdout.strip()
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end <= start:
-        return [], None
-    try:
-        data = json.loads(text[start : end + 1])
-    except json.JSONDecodeError:
-        return [], None
+def parse_play_events(stdout: str) -> tuple[list[TaskRecord], dict[str, Any] | None]:
+    """Parse the JSONL emitted by our rehearse_jsonl stdout callback."""
     records: list[TaskRecord] = []
-    for play in data.get("plays", []):
-        for task in play.get("tasks", []):
-            task_name = str(task.get("task", {}).get("name", "")) or "unnamed task"
-            for _host, result in task.get("hosts", {}).items():
-                if not isinstance(result, dict):
-                    continue
-                records.append(
-                    TaskRecord(
-                        name=task_name,
-                        action=str(result.get("action", "unknown")),
-                        changed=bool(result.get("changed", False)),
-                        failed=bool(result.get("failed", False)),
-                        skipped=bool(result.get("skipped", False)),
-                        unreachable=bool(result.get("unreachable", False)),
-                        msg=str(result["msg"]) if result.get("msg") else None,
-                    )
+    stats: dict[str, Any] | None = None
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        event = data.get("event")
+        if event == "task_result":
+            status = data.get("status", "ok")
+            msg = data.get("msg")
+            if status == "failed" and data.get("ignore_errors"):
+                msg = f"{msg or 'failed'} (ignore_errors: play continued)"
+            records.append(
+                TaskRecord(
+                    name=str(data.get("task") or "") or "unnamed task",
+                    action=str(data.get("action") or "unknown"),
+                    changed=bool(data.get("changed", False)),
+                    failed=status == "failed",
+                    skipped=status == "skipped",
+                    unreachable=status == "unreachable",
+                    msg=str(msg) if msg else None,
                 )
-    return records, data.get("stats")
+            )
+        elif event == "stats" and isinstance(data.get("stats"), dict):
+            stats = data["stats"]
+    return records, stats
+
+
+def callback_plugin_source() -> str:
+    """Return the rehearse_jsonl callback plugin shipped with the package."""
+    from importlib import resources
+
+    return resources.files("ansible_rehearse").joinpath("data/rehearse_jsonl.py").read_text("utf-8")
 
 
 def _annotate_fidelity(records: list[TaskRecord], systemd: bool) -> None:
@@ -155,6 +164,8 @@ def rehearse(
         engine.cp_dir_in(project_dir, name, f"{SELF_DIR}/project")
         engine.write_file(name, f"{SELF_DIR}/collect_state.sh", collector_script())
         engine.write_file(name, f"{SELF_DIR}/inventory.ini", inventory_text)
+        engine.exec(name, ["mkdir", "-p", f"{SELF_DIR}/callbacks"], timeout=60)
+        engine.write_file(name, f"{SELF_DIR}/callbacks/rehearse_jsonl.py", callback_plugin_source())
 
         requirements = project_dir / "requirements.yml"
         if requirements.is_file():
@@ -182,7 +193,8 @@ def rehearse(
 
         say("running the playbook (for real, inside the container)")
         play_env = {
-            "ANSIBLE_STDOUT_CALLBACK": "json",
+            "ANSIBLE_STDOUT_CALLBACK": "rehearse_jsonl",
+            "ANSIBLE_CALLBACK_PLUGINS": f"{SELF_DIR}/callbacks",
             "ANSIBLE_RETRY_FILES_ENABLED": "0",
             "ANSIBLE_HOST_PATTERN_MISMATCH": "warning",
             "ANSIBLE_LOCALHOST_WARNING": "0",
@@ -205,7 +217,7 @@ def rehearse(
             check=False,
             timeout=_PLAY_TIMEOUT,
         )
-        tasks, stats = parse_play_json(play_proc.stdout)
+        tasks, stats = parse_play_events(play_proc.stdout)
         if not tasks and play_proc.returncode != 0:
             stderr_tail = play_proc.stderr.strip().splitlines()[-15:]
             raise RehearseError(
