@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -18,18 +19,24 @@ def test_detect_no_engine_found(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_detect_rejects_binary_in_current_directory(monkeypatch: pytest.MonkeyPatch) -> None:
     # On Windows, which() resolves from the cwd too; a repo shipping its own
     # docker.exe must never be trusted as the engine.
-    from pathlib import Path
-
-    cwd_binary = str(Path.cwd() / "docker.exe")
+    cwd_binary = str(Path.cwd() / "docker")
     monkeypatch.setattr("ansible_rehearse.engine.shutil.which", lambda _name: cwd_binary)
     with pytest.raises(EngineError, match="no container engine found"):
         ContainerEngine.detect()
 
 
-def test_detect_daemon_not_responding(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "ansible_rehearse.engine.shutil.which", lambda name: f"C:\\fake\\{name}.exe"
-    )
+def _fake_which(directory: Path):
+    """which() stub returning an absolute path OUTSIDE the cwd on every platform.
+
+    A Windows-style literal like "C:\\fake\\docker.exe" is a RELATIVE path on
+    POSIX, which resolve() would place inside the cwd - and detect() rejects
+    engine binaries found there.
+    """
+    return lambda name: str(directory / name)
+
+
+def test_detect_daemon_not_responding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("ansible_rehearse.engine.shutil.which", _fake_which(tmp_path))
 
     def fake_run(cmd, **_kwargs):
         return subprocess.CompletedProcess(args=cmd, returncode=1, stdout=b"", stderr=b"dead")
@@ -39,10 +46,8 @@ def test_detect_daemon_not_responding(monkeypatch: pytest.MonkeyPatch) -> None:
         ContainerEngine.detect()
 
 
-def test_detect_prefers_working_engine(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "ansible_rehearse.engine.shutil.which", lambda name: f"C:\\fake\\{name}.exe"
-    )
+def test_detect_prefers_working_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("ansible_rehearse.engine.shutil.which", _fake_which(tmp_path))
 
     def fake_run(cmd, **_kwargs):
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=b"ok", stderr=b"")
