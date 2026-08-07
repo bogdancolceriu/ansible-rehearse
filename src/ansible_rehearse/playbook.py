@@ -8,6 +8,7 @@ warnings instead of being followed.
 
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -55,8 +56,6 @@ _TASK_KEYWORDS = {
     "module_defaults",
     "collections",
     "debugger",
-    "action",
-    "local_action",
     "poll",
     "async",
 }
@@ -105,14 +104,54 @@ class PlaybookScan:
     warnings: list[str] = field(default_factory=list)
 
 
+def _parse_kv_string(text: str) -> dict:
+    """Parse one-line `key=value key2=value2` module args (best effort)."""
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        tokens = text.split()
+    args: dict = {}
+    for token in tokens:
+        key, eq, value = token.partition("=")
+        if eq and key:
+            args[key] = value
+    return args
+
+
+def _module_args(value: object) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        return _parse_kv_string(value)
+    return {}
+
+
 def _extract_action(task: dict) -> tuple[str, dict] | None:
     """Find the module key of a task dict. Returns (module, args) or None."""
+    # Legacy `action:` / `local_action:` forms carry the module inside the value;
+    # missing them would silently bypass the external-effect gate.
+    for legacy_key in ("action", "local_action"):
+        if legacy_key not in task:
+            continue
+        value = task[legacy_key]
+        if isinstance(value, dict):
+            module = value.get("module")
+            if module:
+                args = {k: v for k, v in value.items() if k != "module"}
+                return str(module), args
+        elif isinstance(value, str) and value.strip():
+            head, _, rest = value.strip().partition(" ")
+            return head, _parse_kv_string(rest)
+        return None
     for key, value in task.items():
         if key in _TASK_KEYWORDS or key.startswith("with_"):
             continue
         if key == "block":
             return None
-        args = value if isinstance(value, dict) else {}
+        args = _module_args(value)
+        explicit = task.get("args")
+        if isinstance(explicit, dict):
+            args = {**args, **explicit}
         return str(key), args
     return None
 
@@ -152,8 +191,12 @@ class _Scanner:
         for play in data:
             if not isinstance(play, dict):
                 continue
-            if "import_playbook" in play:
-                self._follow_include(path, play["import_playbook"], depth, playbook=True)
+            import_key = next(
+                (k for k in ("import_playbook", "ansible.builtin.import_playbook") if k in play),
+                None,
+            )
+            if import_key:
+                self._follow_include(path, play[import_key], depth, playbook=True)
                 continue
             hosts = play.get("hosts")
             if isinstance(hosts, list):

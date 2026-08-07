@@ -31,11 +31,17 @@ def _file_change_detail(old: FileEntry, new: FileEntry) -> str | None:
     details: list[str] = []
     if old.ftype != new.ftype:
         details.append(f"type {old.ftype} -> {new.ftype}")
-    elif old.ftype == "f" and (
-        (old.md5 and new.md5 and old.md5 != new.md5)
-        or ((not old.md5 or not new.md5) and old.size != new.size)
-    ):
-        details.append("content")
+    elif old.ftype == "f":
+        if old.md5 and new.md5:
+            content_changed = old.md5 != new.md5
+        else:
+            # Above the hash cap: fall back to size, then mtime (same-size
+            # rewrites would otherwise be invisible).
+            content_changed = old.size != new.size or (
+                old.mtime is not None and new.mtime is not None and old.mtime != new.mtime
+            )
+        if content_changed:
+            details.append("content")
     if old.mode != new.mode:
         details.append(f"mode {old.mode} -> {new.mode}")
     if (old.owner, old.group) != (new.owner, new.group):

@@ -1,25 +1,38 @@
 #!/bin/sh
 # State collector for ansible-rehearse. Runs inside the rehearsal container as root.
-# Output: sectioned plain text, parsed by snapshot.py on the host.
+# Output: sectioned text, parsed by snapshot.py on the host. File records are
+# NUL-delimited (filenames cannot contain NUL, so records cannot be forged by
+# crafted filenames); other sections are line-oriented.
 # Requires GNU findutils/coreutils (Debian/Ubuntu/RHEL-family images).
 set -u
 
 WATCH_DIRS="${REHEARSE_WATCH_DIRS:-/etc /usr/local /opt /srv /root /home /var/spool/cron /var/www}"
 HASH_MAX_BYTES="${REHEARSE_HASH_MAX_BYTES:-4194304}"
-# Our own workspace (venv, project copy) must never show up in the diff.
 SELF_DIR="/opt/ansible-rehearse"
 
 begin() { printf '###REHEARSE:BEGIN %s###\n' "$1"; }
 end()   { printf '###REHEARSE:END###\n'; }
 
+# Only our known subdirectories are hidden from the diff; anything else a
+# playbook drops under $SELF_DIR still shows up.
+list_files() {
+    d="$1"; shift
+    find "$d" -xdev \
+        \( -path "$SELF_DIR/venv" -o -path "$SELF_DIR/project" \
+           -o -path "$SELF_DIR/callbacks" -o -path "$SELF_DIR/tmp" \
+           -o -path "$SELF_DIR/ansible-home" -o -name __pycache__ \) -prune -o \
+        "$@" 2>/dev/null
+}
+
 begin meta
-printf 'format=1\n'
+printf 'format=2\n'
 end
 
 if command -v dpkg-query >/dev/null 2>&1; then
     begin packages.dpkg
+    # ii = installed, hi = installed and held (dpkg_selections: hold)
     dpkg-query -W -f '${db:Status-Abbrev}\t${Package}\t${Version}\n' 2>/dev/null \
-        | grep '^ii' | cut -f2,3
+        | grep -E '^[hi]i' | cut -f2,3
     end
 elif command -v rpm >/dev/null 2>&1; then
     begin packages.rpm
@@ -30,18 +43,16 @@ fi
 begin files
 for d in $WATCH_DIRS; do
     [ -d "$d" ] || continue
-    find "$d" -xdev \( -path "$SELF_DIR" -o -name __pycache__ \) -prune -o \
-        \( -type f -o -type d \) -printf '%y|%#m|%u|%g|%s|%p\n' 2>/dev/null
-    find "$d" -xdev -path "$SELF_DIR" -prune -o \
-        -type l -printf 'l|%#m|%u|%g|%s|%p -> %l\n' 2>/dev/null
+    list_files "$d" \( -type f -o -type d \) -printf '%y|%#m|%u|%g|%s|%T@|%p\0'
+    list_files "$d" -type l -printf 'l|%#m|%u|%g|%s|%T@|%p -> %l\0'
 done
+printf '\n'
 end
 
 begin hashes
 for d in $WATCH_DIRS; do
     [ -d "$d" ] || continue
-    find "$d" -xdev -path "$SELF_DIR" -prune -o \
-        -type f -size -"$HASH_MAX_BYTES"c -print0 2>/dev/null \
+    list_files "$d" -type f -size -"$HASH_MAX_BYTES"c -print0 \
         | xargs -0 -r md5sum 2>/dev/null
 done
 end

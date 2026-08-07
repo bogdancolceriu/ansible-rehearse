@@ -9,14 +9,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .engine import ContainerEngine
-from .fidelity import classify
+from .engine import ContainerEngine, EngineTimeout
+from .fidelity import FIDELITY_NEEDS_SYSTEMD, classify
 from .images import DEFAULT_DISTRO, DISTROS, SELF_DIR, cache_tag, prepare_script
 from .inventory import build_inventory
 from .models import RehearsalResult, TaskRecord
 from .playbook import PlaybookScan, ScannedTask, scan_playbook
-from .snapshot import collector_script, parse_snapshot
+from .snapshot import SnapshotError, collector_script, parse_snapshot
 from .statediff import diff_snapshots
+
+# Environment shared by every ansible invocation in the container: keep all of
+# Ansible's own state (tmp dirs, galaxy content, async dir) under SELF_DIR so it
+# never pollutes the state diff.
+_ANSIBLE_ENV = {
+    "ANSIBLE_HOME": f"{SELF_DIR}/ansible-home",
+    "ANSIBLE_LOCAL_TEMP": f"{SELF_DIR}/tmp",
+    "ANSIBLE_REMOTE_TMP": f"{SELF_DIR}/tmp",
+}
 
 _PLAY_TIMEOUT = 3600
 _SNAPSHOT_TIMEOUT = 600
@@ -134,6 +143,24 @@ def rehearse(
             f"external task allowed to run: {task.name} - {reason}"
             for task, reason in scan.external
         )
+    if not cfg.systemd:
+        service_tasks = [
+            t.name
+            for t in scan.tasks
+            if classify(t.action, systemd=False)[0] == FIDELITY_NEEDS_SYSTEMD
+        ]
+        if service_tasks:
+            warnings.append(
+                f"{len(service_tasks)} service task(s) found (e.g. "
+                f"{service_tasks[0]!r}) but a plain container has no service "
+                "manager - they will likely fail; rerun with --systemd"
+            )
+    else:
+        warnings.append(
+            "--systemd runs a PRIVILEGED container sharing host cgroups: "
+            "kernel-level tasks (sysctl, mounts, firewall) can leak to the "
+            "docker host - rehearse only playbooks you trust"
+        )
 
     engine = ContainerEngine.detect(cfg.engine)
     base_image = cfg.image or (spec.systemd_image if cfg.systemd else spec.plain_image)
@@ -160,20 +187,37 @@ def rehearse(
                 engine.commit(name, cached_tag)
 
         say("copying project into the container")
-        engine.exec(name, ["mkdir", "-p", f"{SELF_DIR}/project"], timeout=60)
+        # All of these live under SELF_DIR and exist BEFORE the first snapshot,
+        # so neither our workspace nor Ansible's own state shows up in the diff.
+        engine.exec(
+            name,
+            [
+                "mkdir",
+                "-p",
+                f"{SELF_DIR}/project",
+                f"{SELF_DIR}/callbacks",
+                f"{SELF_DIR}/tmp",
+                f"{SELF_DIR}/ansible-home",
+            ],
+            timeout=60,
+        )
         engine.cp_dir_in(project_dir, name, f"{SELF_DIR}/project")
-        engine.write_file(name, f"{SELF_DIR}/collect_state.sh", collector_script())
         engine.write_file(name, f"{SELF_DIR}/inventory.ini", inventory_text)
-        engine.exec(name, ["mkdir", "-p", f"{SELF_DIR}/callbacks"], timeout=60)
         engine.write_file(name, f"{SELF_DIR}/callbacks/rehearse_jsonl.py", callback_plugin_source())
 
         requirements = project_dir / "requirements.yml"
         if requirements.is_file():
             say("installing Galaxy requirements")
+            warnings.append(
+                "requirements.yml content is installed at runtime and is NOT scanned "
+                "by the external-effect gate - review third-party roles yourself"
+            )
             galaxy = f"{SELF_DIR}/venv/bin/ansible-galaxy"
             req_path = f"{SELF_DIR}/project/requirements.yml"
             for sub in (["collection", "install", "-r", req_path], ["install", "-r", req_path]):
-                proc = engine.exec(name, [galaxy, *sub], check=False, timeout=_PREPARE_TIMEOUT)
+                proc = engine.exec(
+                    name, [galaxy, *sub], env=_ANSIBLE_ENV, check=False, timeout=_PREPARE_TIMEOUT
+                )
                 if proc.returncode != 0:
                     warnings.append(f"ansible-galaxy {sub[0]} failed: {proc.stderr.strip()[:200]}")
 
@@ -182,17 +226,20 @@ def rehearse(
             defaults = "/etc /usr/local /opt /srv /root /home /var/spool/cron /var/www"
             snapshot_env["REHEARSE_WATCH_DIRS"] = defaults + " " + " ".join(cfg.extra_watch)
 
+        # The collector is piped over stdin on every use: there is no on-disk
+        # copy a playbook could tamper with between the two snapshots.
         say("taking the before snapshot")
-        before_proc = engine.exec(
-            name,
-            ["sh", f"{SELF_DIR}/collect_state.sh"],
-            env=snapshot_env,
-            timeout=_SNAPSHOT_TIMEOUT,
+        before_proc = engine.exec_script(
+            name, collector_script(), env=snapshot_env, timeout=_SNAPSHOT_TIMEOUT
         )
-        before = parse_snapshot(before_proc.stdout)
+        try:
+            before = parse_snapshot(before_proc.stdout)
+        except SnapshotError as exc:
+            raise RehearseError(f"could not parse the before snapshot: {exc}") from exc
 
         say("running the playbook (for real, inside the container)")
         play_env = {
+            **_ANSIBLE_ENV,
             "ANSIBLE_STDOUT_CALLBACK": "rehearse_jsonl",
             "ANSIBLE_CALLBACK_PLUGINS": f"{SELF_DIR}/callbacks",
             "ANSIBLE_RETRY_FILES_ENABLED": "0",
@@ -209,31 +256,44 @@ def rehearse(
             _container_playbook_path(playbook, project_dir),
             *cfg.ansible_args,
         ]
-        play_proc = engine.exec(
-            name,
-            play_cmd,
-            env=play_env,
-            workdir=f"{SELF_DIR}/project",
-            check=False,
-            timeout=_PLAY_TIMEOUT,
-        )
-        tasks, stats = parse_play_events(play_proc.stdout)
-        if not tasks and play_proc.returncode != 0:
-            stderr_tail = play_proc.stderr.strip().splitlines()[-15:]
+        play_timed_out = False
+        try:
+            play_proc = engine.exec(
+                name,
+                play_cmd,
+                env=play_env,
+                workdir=f"{SELF_DIR}/project",
+                check=False,
+                timeout=_PLAY_TIMEOUT,
+            )
+            play_stdout, play_stderr = play_proc.stdout, play_proc.stderr
+            play_rc = play_proc.returncode
+        except EngineTimeout as exc:
+            # Keep the partial task output instead of dying with an engine error.
+            play_timed_out = True
+            play_stdout, play_stderr = exc.stdout, exc.stderr
+            play_rc = 124
+            warnings.append(
+                f"ansible-playbook exceeded the {_PLAY_TIMEOUT}s timeout and was "
+                "aborted; the diff reflects whatever ran until then"
+            )
+        tasks, stats = parse_play_events(play_stdout)
+        if not tasks and play_rc != 0 and not play_timed_out:
+            stderr_tail = play_stderr.strip().splitlines()[-15:]
             raise RehearseError(
                 "ansible-playbook failed before producing task results "
-                f"(rc={play_proc.returncode}):\n" + "\n".join(stderr_tail)
+                f"(rc={play_rc}):\n" + "\n".join(stderr_tail)
             )
         _annotate_fidelity(tasks, cfg.systemd)
 
         say("taking the after snapshot")
-        after_proc = engine.exec(
-            name,
-            ["sh", f"{SELF_DIR}/collect_state.sh"],
-            env=snapshot_env,
-            timeout=_SNAPSHOT_TIMEOUT,
+        after_proc = engine.exec_script(
+            name, collector_script(), env=snapshot_env, timeout=_SNAPSHOT_TIMEOUT
         )
-        after = parse_snapshot(after_proc.stdout)
+        try:
+            after = parse_snapshot(after_proc.stdout)
+        except SnapshotError as exc:
+            raise RehearseError(f"could not parse the after snapshot: {exc}") from exc
 
         diff = diff_snapshots(before, after)
 
@@ -249,7 +309,7 @@ def rehearse(
             image=image,
             systemd=cfg.systemd,
             engine=engine.name,
-            play_rc=play_proc.returncode,
+            play_rc=play_rc,
             diff=diff,
             tasks=tasks,
             stats=stats,

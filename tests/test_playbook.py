@@ -231,3 +231,94 @@ def test_not_a_playbook_raises(tmp_path: Path) -> None:
     (tmp_path / "vars.yml").write_text("key: value\n", encoding="utf-8")
     with pytest.raises(PlaybookError):
         scan_playbook(tmp_path / "vars.yml")
+
+
+LEGACY_ACTION_PLAYBOOK = """\
+---
+- hosts: all
+  tasks:
+    - name: Legacy string action form
+      action: ec2_instance name=prod-web state=running
+    - name: Legacy local_action string form
+      local_action: uri url=https://api.example.com/deploy method=POST
+    - name: Legacy dict action form
+      action:
+        module: amazon.aws.s3_bucket
+        name: my-bucket
+    - name: Harmless legacy action
+      action: copy src=a dest=/etc/b
+"""
+
+
+def test_legacy_action_forms_do_not_bypass_the_gate(tmp_path: Path) -> None:
+    (tmp_path / "legacy.yml").write_text(LEGACY_ACTION_PLAYBOOK, encoding="utf-8")
+    scan = scan_playbook(tmp_path / "legacy.yml")
+    actions = {t.action for t in scan.tasks}
+    assert "ec2_instance" in actions
+    assert "uri" in actions
+    assert "amazon.aws.s3_bucket" in actions
+    assert "copy" in actions
+    external_names = {t.name for t, _reason in scan.external}
+    assert "Legacy string action form" in external_names
+    assert "Legacy local_action string form" in external_names  # POST parsed from k=v
+    assert "Legacy dict action form" in external_names
+    assert "Harmless legacy action" not in external_names
+
+
+def test_kv_string_args_feed_external_detection(tmp_path: Path) -> None:
+    (tmp_path / "kv.yml").write_text(
+        """\
+---
+- hosts: all
+  tasks:
+    - name: Inline POST
+      ansible.builtin.uri: url=https://api.example.com/x method=POST
+    - name: Inline GET
+      ansible.builtin.uri: url=https://api.example.com/x
+""",
+        encoding="utf-8",
+    )
+    scan = scan_playbook(tmp_path / "kv.yml")
+    external_names = {t.name for t, _reason in scan.external}
+    assert "Inline POST" in external_names
+    assert "Inline GET" not in external_names
+
+
+def test_args_keyword_merges_into_module_args(tmp_path: Path) -> None:
+    (tmp_path / "args.yml").write_text(
+        """\
+---
+- hosts: all
+  tasks:
+    - name: POST via args
+      ansible.builtin.uri:
+        url: https://api.example.com/x
+      args:
+        method: POST
+""",
+        encoding="utf-8",
+    )
+    scan = scan_playbook(tmp_path / "args.yml")
+    assert {t.name for t, _r in scan.external} == {"POST via args"}
+
+
+def test_fqcn_import_playbook_followed(tmp_path: Path) -> None:
+    (tmp_path / "site.yml").write_text(
+        "---\n- ansible.builtin.import_playbook: sub/other.yml\n", encoding="utf-8"
+    )
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "other.yml").write_text(
+        """\
+---
+- hosts: fqcn_imported
+  tasks:
+    - name: T
+      ansible.builtin.file:
+        path: /tmp/x
+        state: touch
+""",
+        encoding="utf-8",
+    )
+    scan = scan_playbook(tmp_path / "site.yml")
+    assert "fqcn_imported" in scan.hosts_patterns

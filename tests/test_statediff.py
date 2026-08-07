@@ -53,6 +53,25 @@ def test_file_unhashed_falls_back_to_size() -> None:
     assert "content" in (diff.files[0].detail or "")
 
 
+def test_file_unhashed_same_size_falls_back_to_mtime() -> None:
+    old = FileEntry(ftype="f", mode="0644", owner="root", group="root", size=10, mtime="100.0")
+    new = FileEntry(ftype="f", mode="0644", owner="root", group="root", size=10, mtime="200.0")
+    diff = diff_snapshots(Snapshot(files={"/big.bin": old}), Snapshot(files={"/big.bin": new}))
+    assert diff.files[0].action == "changed"
+    assert "content" in (diff.files[0].detail or "")
+
+
+def test_hashed_files_ignore_mtime() -> None:
+    old = FileEntry(
+        ftype="f", mode="0644", owner="root", group="root", size=10, mtime="100.0", md5="aa"
+    )
+    new = FileEntry(
+        ftype="f", mode="0644", owner="root", group="root", size=10, mtime="200.0", md5="aa"
+    )
+    diff = diff_snapshots(Snapshot(files={"/etc/a": old}), Snapshot(files={"/etc/a": new}))
+    assert diff.files == []  # same hash wins over differing mtime (e.g. touch)
+
+
 def test_file_mode_and_owner_change() -> None:
     before = Snapshot(files={"/etc/a": _file(mode="0644")})
     after = Snapshot(

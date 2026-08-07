@@ -1,4 +1,4 @@
-"""Parser tests against realistic collector output."""
+"""Parser tests against realistic collector output (format 2)."""
 
 from __future__ import annotations
 
@@ -11,9 +11,22 @@ from ansible_rehearse.snapshot import (
     split_sections,
 )
 
-DPKG_OUTPUT = """\
+# File records are NUL-delimited: y|mode|owner|group|size|mtime|path
+_FILE_RECORDS = "\0".join(
+    [
+        "d|0755|root|root|4096|1700000000.0000000000|/etc",
+        "f|0644|root|root|769|1700000001.1234567890|/etc/passwd",
+        "f|0600|root|shadow|501|1700000002.0000000000|/etc/shadow",
+        "f|0644|root|root|12|1700000003.0000000000|/etc/pipe|name.conf",
+        "f|0644|root|root|9|1700000004.0000000000|/etc/weird\nname.conf",
+        "l|0777|root|root|21|1700000005.0000000000|/etc/mtab -> ../proc/self/mounts",
+    ]
+)
+
+DPKG_OUTPUT = (
+    """\
 ###REHEARSE:BEGIN meta###
-format=1
+format=2
 ###REHEARSE:END###
 ###REHEARSE:BEGIN packages.dpkg###
 adduser\t3.118ubuntu5
@@ -21,15 +34,14 @@ base-files\t12ubuntu4.7
 nginx\t1.18.0-6ubuntu14.6
 ###REHEARSE:END###
 ###REHEARSE:BEGIN files###
-d|0755|root|root|4096|/etc
-f|0644|root|root|769|/etc/passwd
-f|0600|root|shadow|501|/etc/shadow
-l|0777|root|root|21|/etc/mtab -> ../proc/self/mounts
-f|0644|root|root|12|/etc/pipe|name.conf
+"""
+    + _FILE_RECORDS
+    + """
 ###REHEARSE:END###
 ###REHEARSE:BEGIN hashes###
 d41d8cd98f00b204e9800998ecf8427e  /etc/passwd
 0123456789abcdef0123456789abcdef  /etc/pipe|name.conf
+\\fedcba9876543210fedcba9876543210  /etc/weird\\nname.conf
 ###REHEARSE:END###
 ###REHEARSE:BEGIN services.unavailable###
 ###REHEARSE:END###
@@ -48,6 +60,7 @@ sudo:x:27:alice,bob
 ###REHEARSE:END###
 ###REHEARSE:DONE###
 """
+)
 
 
 def test_parse_dpkg_snapshot() -> None:
@@ -60,9 +73,11 @@ def test_parse_dpkg_snapshot() -> None:
 def test_parse_files_and_hashes() -> None:
     snap = parse_snapshot(DPKG_OUTPUT)
     assert snap.files["/etc"].ftype == "d"
+    assert snap.files["/etc"].mtime is None  # mtime only kept for regular files
     passwd = snap.files["/etc/passwd"]
     assert passwd.mode == "0644"
     assert passwd.size == 769
+    assert passwd.mtime == "1700000001.1234567890"
     assert passwd.md5 == "d41d8cd98f00b204e9800998ecf8427e"
     shadow = snap.files["/etc/shadow"]
     assert shadow.group == "shadow"
@@ -70,9 +85,17 @@ def test_parse_files_and_hashes() -> None:
     link = snap.files["/etc/mtab"]
     assert link.ftype == "l"
     assert link.target == "../proc/self/mounts"
-    # A path containing '|' still parses (only the first 5 pipes split fields).
-    weird = snap.files["/etc/pipe|name.conf"]
-    assert weird.md5 == "0123456789abcdef0123456789abcdef"
+    # A path containing '|' still parses (only the first 6 pipes split fields).
+    assert snap.files["/etc/pipe|name.conf"].md5 == "0123456789abcdef0123456789abcdef"
+
+
+def test_newline_in_filename_survives_nul_protocol() -> None:
+    snap = parse_snapshot(DPKG_OUTPUT)
+    weird = snap.files["/etc/weird\nname.conf"]
+    assert weird.size == 9
+    # GNU md5sum escapes the newline and prefixes the line with a backslash;
+    # the parser reverses that, so the hash still attaches to the right path.
+    assert weird.md5 == "fedcba9876543210fedcba9876543210"
 
 
 def test_parse_services_unavailable_is_none() -> None:
@@ -98,7 +121,7 @@ def test_parse_users_groups() -> None:
 
 RPM_WITH_SYSTEMD = """\
 ###REHEARSE:BEGIN meta###
-format=1
+format=2
 ###REHEARSE:END###
 ###REHEARSE:BEGIN packages.rpm###
 bash\t5.1.8-9.el9
@@ -141,21 +164,32 @@ def test_missing_meta_raises() -> None:
         parse_snapshot("random garbage\nno sections here\n")
 
 
+def test_truncated_stream_raises() -> None:
+    truncated = DPKG_OUTPUT.split("###REHEARSE:DONE###")[0]
+    with pytest.raises(SnapshotError, match="DONE"):
+        parse_snapshot(truncated)
+
+
 def test_crlf_tolerated() -> None:
-    snap = parse_snapshot(DPKG_OUTPUT.replace("\n", "\r\n"))
-    assert snap.packages["nginx"] == "1.18.0-6ubuntu14.6"
+    # CRLF can appear on line-oriented sections (docker on Windows); NUL records
+    # are unaffected by definition.
+    snap = parse_snapshot(RPM_WITH_SYSTEMD.replace("\n", "\r\n"))
+    assert snap.packages["bash"] == "5.1.8-9.el9"
 
 
 def test_split_sections_ignores_text_outside_sections() -> None:
-    text = "noise before\n###REHEARSE:BEGIN meta###\nformat=1\n###REHEARSE:END###\nnoise after\n"
+    text = "noise before\n###REHEARSE:BEGIN meta###\nformat=2\n###REHEARSE:END###\nnoise after\n"
     sections = split_sections(text)
-    assert sections == {"meta": ["format=1"]}
+    assert list(sections) == ["meta"]
+    assert sections["meta"].strip() == "format=2"
 
 
 def test_collector_script_ships_with_package() -> None:
     script = collector_script()
     assert script.startswith("#!/bin/sh")
     assert "###REHEARSE:BEGIN" in script
-    # The workspace must be pruned from the diff, and the script must not use bashisms.
-    assert "/opt/ansible-rehearse" in script
+    # Held packages must still count as installed (dpkg_selections: hold).
+    assert "'^[hi]i'" in script
+    # Only known workspace subdirs are pruned, and no bashisms.
+    assert '"$SELF_DIR/venv"' in script
     assert "[[" not in script

@@ -96,6 +96,9 @@ def test_full_rehearsal_ubuntu22(demo_project: Path) -> None:
     assert result.diff.services is None
     assert any("plain container" in w for w in result.warnings)
 
+    # Ansible's own state (tmp dirs, ANSIBLE_HOME) must never pollute the diff
+    assert not any(c.item.startswith("/root/.ansible") for c in result.diff.files)
+
     # fidelity annotations came through
     by_action = {t.action.rsplit(".", 1)[-1]: t for t in result.tasks}
     assert by_action["shell"].fidelity == "real-exec"
@@ -107,6 +110,72 @@ def test_full_rehearsal_ubuntu22(demo_project: Path) -> None:
     assert result2.play_rc == 0
     assert result2.image.startswith("ansible-rehearse/prepared:")
     assert "zip" in {c.item for c in result2.diff.packages if c.action == "added"}
+
+
+@pytest.mark.skipif(not _engine_available(), reason="no container engine on PATH")
+def test_rocky9_rpm_family(tmp_path: Path) -> None:
+    (tmp_path / "rocky.yml").write_text(
+        """\
+---
+- hosts: all
+  become: true
+  tasks:
+    - name: Install zip
+      ansible.builtin.package:
+        name: zip
+        state: present
+    - name: Drop a file
+      ansible.builtin.copy:
+        dest: /etc/rehearse-rocky.conf
+        content: "rpm-side\\n"
+""",
+        encoding="utf-8",
+    )
+    cfg = RunConfig(playbook=tmp_path / "rocky.yml", distro="rocky9")
+    result = rehearse(cfg, progress=print)
+    assert result.play_rc == 0, [t.msg for t in result.tasks if t.failed]
+    assert "zip" in {c.item for c in result.diff.packages if c.action == "added"}
+    assert "/etc/rehearse-rocky.conf" in {c.item for c in result.diff.files if c.action == "added"}
+
+
+@pytest.mark.systemd
+@pytest.mark.skipif(not _engine_available(), reason="no container engine on PATH")
+def test_systemd_service_rehearsal(tmp_path: Path) -> None:
+    (tmp_path / "web.yml").write_text(
+        """\
+---
+- hosts: webservers
+  become: true
+  tasks:
+    - name: Install nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+        update_cache: true
+    - name: Enable and start nginx
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: true
+""",
+        encoding="utf-8",
+    )
+    cfg = RunConfig(playbook=tmp_path / "web.yml", distro="ubuntu22", systemd=True)
+    result = rehearse(cfg, progress=print)
+    assert result.play_rc == 0, [t.msg for t in result.tasks if t.failed]
+
+    assert result.diff.services is not None
+    nginx_changes = [c for c in result.diff.services if "nginx" in c.item]
+    assert nginx_changes, "expected nginx.service in the services diff"
+
+    assert result.diff.ports is not None
+    assert any(":80" in c.item for c in result.diff.ports if c.action == "added")
+
+    service_task = next(t for t in result.tasks if t.action.endswith("service"))
+    assert service_task.fidelity == "exact"  # exact in --systemd mode
+
+    # the privileged-container honesty warning must be present
+    assert any("PRIVILEGED" in w for w in result.warnings)
 
 
 @pytest.mark.skipif(not _engine_available(), reason="no container engine on PATH")

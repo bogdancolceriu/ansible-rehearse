@@ -1,10 +1,13 @@
 """Render a rehearsal result: terraform-plan-style diff plus a task fidelity table.
 
-Every dynamic string coming from playbooks or container output goes through
-rich.markup.escape - task names and file paths must never be interpreted as markup.
+Every dynamic string coming from playbooks or container output goes through _esc():
+Rich markup is escaped AND C0 control characters (ANSI escapes included) are
+replaced, so playbook-controlled strings cannot rewrite the rendered plan.
 """
 
 from __future__ import annotations
+
+import re
 
 from rich.console import Console
 from rich.markup import escape
@@ -44,19 +47,26 @@ _SECTION_TITLES = {
     "groups": "Groups",
 }
 
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def _esc(value: object) -> str:
+    """Escape Rich markup and strip control characters from untrusted strings."""
+    return escape(_CTRL_RE.sub("�", str(value)))
+
 
 def _change_line(change: Change) -> str:
     style = _ACTION_STYLE[change.action]
     symbol = _ACTION_SYMBOL[change.action]
-    parts = [f"  [{style}]{symbol}[/] [bold]{escape(change.item)}[/bold]"]
+    parts = [f"  [{style}]{symbol}[/] [bold]{_esc(change.item)}[/bold]"]
     if change.action == "changed" and change.before and change.after:
-        parts.append(f"{escape(change.before)} -> {escape(change.after)}")
+        parts.append(f"{_esc(change.before)} -> {_esc(change.after)}")
     elif change.after:
-        parts.append(escape(change.after))
+        parts.append(_esc(change.after))
     elif change.before:
-        parts.append(escape(change.before))
+        parts.append(_esc(change.before))
     if change.detail:
-        parts.append(f"[dim]({escape(change.detail)})[/dim]")
+        parts.append(f"[dim]({_esc(change.detail)})[/dim]")
     return " ".join(parts)
 
 
@@ -64,8 +74,8 @@ def render_diff(result: RehearsalResult, console: Console) -> None:
     console.print()
     mode = "systemd" if result.systemd else "plain"
     console.print(
-        f"[bold]Rehearsal of[/bold] {escape(result.playbook)} "
-        f"[dim]({result.distro}, {mode} container, {escape(result.image)}, "
+        f"[bold]Rehearsal of[/bold] {_esc(result.playbook)} "
+        f"[dim]({result.distro}, {mode} container, {_esc(result.image)}, "
         f"via {result.engine})[/dim]"
     )
     console.print()
@@ -77,8 +87,8 @@ def render_diff(result: RehearsalResult, console: Console) -> None:
         )
         for task in result.tasks:
             if task.failed:
-                msg = f" - {escape(task.msg)}" if task.msg else ""
-                console.print(f"  [red]failed:[/red] {escape(task.name)}{msg}")
+                msg = f" - {_esc(task.msg)}" if task.msg else ""
+                console.print(f"  [red]failed:[/red] {_esc(task.name)}{msg}")
         console.print()
 
     for section, changes in result.diff.sections().items():
@@ -118,11 +128,11 @@ def render_tasks(result: RehearsalResult, console: Console) -> None:
             changed = "no"
         style = _FIDELITY_STYLE.get(task.fidelity, "white")
         table.add_row(
-            escape(task.name),
-            escape(task.action),
+            _esc(task.name),
+            _esc(task.action),
             changed,
             f"[{style}]{task.fidelity}[/{style}]",
-            escape(task.note),
+            _esc(task.note),
         )
     console.print(table)
     console.print()
@@ -130,8 +140,13 @@ def render_tasks(result: RehearsalResult, console: Console) -> None:
 
 def render_summary(result: RehearsalResult, console: Console) -> None:
     counts = result.diff.counts()
+    label = (
+        "[bold red]Partial plan (playbook FAILED):[/bold red]"
+        if result.play_failed
+        else "[bold]Plan:[/bold]"
+    )
     console.print(
-        f"[bold]Plan:[/bold] [green]{counts['added']} to add[/green], "
+        f"{label} [green]{counts['added']} to add[/green], "
         f"[yellow]{counts['changed']} to change[/yellow], "
         f"[red]{counts['removed']} to remove[/red] "
         f"[dim](observed inside the rehearsal container)[/dim]"
@@ -143,7 +158,7 @@ def render_summary(result: RehearsalResult, console: Console) -> None:
         parts = [f"{count} {name}" for name, count in sorted(fidelity_counts.items())]
         console.print(f"[bold]Tasks:[/bold] {len(result.tasks)} total ({', '.join(parts)})")
     for warning in result.warnings:
-        console.print(f"[yellow]warning:[/yellow] {escape(warning)}")
+        console.print(f"[yellow]warning:[/yellow] {_esc(warning)}")
     console.print(
         "\n[dim]A rehearsal is not your production host: the diff reflects this "
         "container's state. Treat 'approximate' and 'unknown' tasks with care.[/dim]"

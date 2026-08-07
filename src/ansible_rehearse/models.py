@@ -13,6 +13,7 @@ class FileEntry:
     owner: str
     group: str
     size: int
+    mtime: str | None = None  # regular files only; content-change fallback for unhashed files
     md5: str | None = None  # regular files under the hash size cap only
     target: str | None = None  # symlink target
 

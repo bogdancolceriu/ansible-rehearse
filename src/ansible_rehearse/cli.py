@@ -12,6 +12,7 @@ from rich.markup import escape
 from . import __version__
 from .engine import EngineError
 from .images import DEFAULT_DISTRO, DISTROS
+from .playbook import PlaybookError
 from .report import render, render_fidelity_matrix
 from .runner import ExternalTasksError, RehearseError, RunConfig, rehearse
 
@@ -150,6 +151,9 @@ def run(
     except EngineError as exc:
         err_console.print(f"[red]container engine error:[/red] {escape(str(exc))}")
         raise typer.Exit(EXIT_ENGINE) from None
+    except PlaybookError as exc:
+        err_console.print(f"[red]playbook error:[/red] {escape(str(exc))}")
+        raise typer.Exit(EXIT_USAGE) from None
     except RehearseError as exc:
         err_console.print(f"[red]error:[/red] {escape(str(exc))}")
         raise typer.Exit(EXIT_USAGE) from None

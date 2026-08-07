@@ -18,6 +18,15 @@ class EngineError(RuntimeError):
         super().__init__(f"{message}{detail}")
 
 
+class EngineTimeout(EngineError):
+    """A container command exceeded its timeout; partial output is preserved."""
+
+    def __init__(self, message: str, stdout: str = "", stderr: str = ""):
+        super().__init__(message)
+        self.stdout = stdout
+        self.stderr = stderr
+
+
 class ContainerEngine:
     def __init__(self, binary: str):
         self.binary = binary
@@ -35,7 +44,9 @@ class ContainerEngine:
             if not path:
                 continue
             engine = cls(path)
-            probe = engine._run("info", "--format", "{{.ServerVersion}}", check=False)
+            # Plain `info` works for both docker and podman (podman has no
+            # .ServerVersion template field); rc 0 means the engine is usable.
+            probe = engine._run("info", check=False, timeout=20)
             if probe.returncode == 0:
                 return engine
             found_but_dead.append(candidate)
@@ -68,7 +79,11 @@ class ContainerEngine:
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired as exc:
-            raise EngineError(f"'{self.name} {args[0]}' timed out after {timeout}s") from exc
+            raise EngineTimeout(
+                f"'{self.name} {args[0]}' timed out after {timeout}s",
+                stdout=(exc.stdout or b"").decode("utf-8", errors="replace"),
+                stderr=(exc.stderr or b"").decode("utf-8", errors="replace"),
+            ) from exc
         proc = subprocess.CompletedProcess(
             args=cmd,
             returncode=raw.returncode,
@@ -85,7 +100,7 @@ class ContainerEngine:
     # -- images ---------------------------------------------------------------
 
     def image_exists(self, tag: str) -> bool:
-        return self._run("image", "inspect", tag, check=False).returncode == 0
+        return self._run("image", "inspect", tag, check=False, timeout=30).returncode == 0
 
     def commit(self, container: str, tag: str) -> None:
         self._run("commit", container, tag, timeout=300)

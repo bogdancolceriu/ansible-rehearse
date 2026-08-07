@@ -7,29 +7,40 @@ import re
 HOSTNAME = "rehearsal-host"
 
 # Names that already resolve without a dedicated group.
-_IMPLICIT = {"all", "*", "localhost", "127.0.0.1", "ungrouped"}
+_IMPLICIT = {"all", "*", "localhost", "127.0.0.1"}
 
 _VALID_GROUP = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 
 
-def hosts_groups(patterns: list[str]) -> tuple[set[str], list[str]]:
-    """Extract concrete group names from hosts patterns.
+def hosts_groups(patterns: list[str]) -> tuple[dict[str, bool], list[str]]:
+    """Extract group names from hosts patterns.
 
-    Returns (groups, warnings). Wildcard or regex patterns cannot be mapped to a
-    single synthetic host, so they are surfaced as warnings instead.
+    Returns ({group: host_belongs}, warnings). Groups referenced by exclusion
+    (`!group`) must EXIST but must NOT contain the rehearsal host, otherwise the
+    exclusion would remove our only host from the play. Wildcard or regex
+    patterns cannot be mapped to a single synthetic host, so they are surfaced
+    as warnings instead.
     """
-    groups: set[str] = set()
+    groups: dict[str, bool] = {}
     warnings: list[str] = []
     for pattern in patterns:
         for token in re.split(r"[:,]", str(pattern)):
             token = token.strip()
             if not token:
                 continue
+            negated = token.startswith("!")
             token = token.lstrip("!&")
             if not token or token.lower() in _IMPLICIT:
                 continue
+            if token.lower() == "ungrouped":
+                warnings.append(
+                    "hosts pattern 'ungrouped' will not match: the rehearsal host "
+                    "always belongs to the [rehearsal] group"
+                )
+                continue
             if _VALID_GROUP.match(token):
-                groups.add(token)
+                # Include the host unless the group is ONLY ever excluded.
+                groups[token] = groups.get(token, False) or not negated
             else:
                 warnings.append(
                     f"hosts pattern {token!r} is not a plain group name; "
@@ -56,5 +67,8 @@ def build_inventory(
             )
     lines.append("")
     for group in sorted(groups):
-        lines.extend([f"[{group}]", HOSTNAME, ""])
+        lines.append(f"[{group}]")
+        if groups[group]:
+            lines.append(HOSTNAME)
+        lines.append("")
     return "\n".join(lines) + "\n", warnings

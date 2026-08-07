@@ -288,8 +288,20 @@ def classify(action: str, systemd: bool = False, args: dict | None = None) -> tu
             "no service manager in a plain container - rerun with --systemd",
         )
     if name in _APPROXIMATE:
+        if systemd:
+            return (
+                FIDELITY_APPROXIMATE,
+                "PRIVILEGED container: kernel-level changes (sysctl, mounts, firewall) "
+                "can affect the DOCKER HOST itself",
+            )
         return FIDELITY_APPROXIMATE, "container kernel/subsystems differ from a real host"
     if name in _NOT_REHEARSABLE:
+        if systemd:
+            return (
+                FIDELITY_NOT_REHEARSABLE,
+                "kernel/hardware/boot operation - in a PRIVILEGED container it may "
+                "hit the DOCKER HOST instead of a target",
+            )
         return FIDELITY_NOT_REHEARSABLE, "kernel/hardware/boot operation"
     if name in _EXACT:
         return FIDELITY_EXACT, ""

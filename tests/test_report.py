@@ -88,6 +88,33 @@ def test_render_empty_diff() -> None:
     assert "No observable state changes" in text
 
 
+def test_ansi_escapes_in_task_names_are_neutralized() -> None:
+    hostile = "\x1b[2J\x1b[31mfake-clean-screen\x07"
+    result = _result(
+        tasks=[
+            TaskRecord(
+                name=hostile,
+                action="ansible.builtin.debug",
+                changed=False,
+                failed=False,
+                skipped=False,
+                fidelity="exact",
+            )
+        ]
+    )
+    text = _render_to_text(result)
+    assert "\x1b" not in text  # no raw ESC may survive into the output
+    assert "\x07" not in text
+    assert "fake-clean-screen" in text
+
+
+def test_failed_play_summary_is_labeled_partial() -> None:
+    text = _render_to_text(_result(play_rc=2))
+    assert "Partial plan" in text
+    ok_text = _render_to_text(_result(play_rc=0))
+    assert "Partial plan" not in ok_text
+
+
 def test_markup_injection_in_task_names_is_escaped() -> None:
     hostile = "[red]evil[/red] [link=http://x]task[/link]"
     result = _result(
