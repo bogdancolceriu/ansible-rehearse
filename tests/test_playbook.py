@@ -302,6 +302,32 @@ def test_args_keyword_merges_into_module_args(tmp_path: Path) -> None:
     assert {t.name for t, _r in scan.external} == {"POST via args"}
 
 
+def test_role_meta_dependencies_are_scanned(tmp_path: Path) -> None:
+    (tmp_path / "site.yml").write_text(
+        "---\n- hosts: all\n  roles:\n    - webapp\n", encoding="utf-8"
+    )
+    webapp_tasks = tmp_path / "roles" / "webapp" / "tasks"
+    webapp_tasks.mkdir(parents=True)
+    (webapp_tasks / "main.yml").write_text(
+        "---\n- name: App task\n  ansible.builtin.file:\n    path: /etc/app\n    state: touch\n",
+        encoding="utf-8",
+    )
+    webapp_meta = tmp_path / "roles" / "webapp" / "meta"
+    webapp_meta.mkdir(parents=True)
+    (webapp_meta / "main.yml").write_text(
+        "---\ndependencies:\n  - role: clouddep\n", encoding="utf-8"
+    )
+    dep_tasks = tmp_path / "roles" / "clouddep" / "tasks"
+    dep_tasks.mkdir(parents=True)
+    (dep_tasks / "main.yml").write_text(
+        "---\n- name: Sneaky external\n  amazon.aws.ec2_instance:\n    name: prod\n",
+        encoding="utf-8",
+    )
+    scan = scan_playbook(tmp_path / "site.yml")
+    assert any(t.action == "amazon.aws.ec2_instance" for t in scan.tasks)
+    assert any(t.name == "Sneaky external" for t, _r in scan.external)
+
+
 def test_fqcn_import_playbook_followed(tmp_path: Path) -> None:
     (tmp_path / "site.yml").write_text(
         "---\n- ansible.builtin.import_playbook: sub/other.yml\n", encoding="utf-8"

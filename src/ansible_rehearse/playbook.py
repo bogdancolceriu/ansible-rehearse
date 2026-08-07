@@ -279,16 +279,34 @@ class _Scanner:
 
     def _scan_role(self, role_name: str, depth: int) -> None:
         role_dir = self.project_dir / "roles" / role_name
+        if not role_dir.is_dir():
+            self.scan.warnings.append(
+                f"role '{role_name}' not found under roles/ - its tasks were not scanned"
+            )
+            return
         for sub in ("tasks", "handlers"):
             folder = role_dir / sub
             if not folder.is_dir():
                 continue
             for task_file in sorted(folder.glob("*.yml")) + sorted(folder.glob("*.yaml")):
                 self._scan_task_file(task_file, depth + 1)
-        if not role_dir.is_dir():
-            self.scan.warnings.append(
-                f"role '{role_name}' not found under roles/ - its tasks were not scanned"
-            )
+        # Role dependencies (meta/main.yml) run before the role's own tasks and
+        # must not escape the external-effect gate.
+        for meta_name in ("main.yml", "main.yaml"):
+            meta_file = role_dir / "meta" / meta_name
+            if not meta_file.is_file():
+                continue
+            try:
+                meta = load_yaml(meta_file.read_text("utf-8"))
+            except (OSError, yaml.YAMLError) as exc:
+                self.scan.warnings.append(f"cannot scan {role_name}/meta/{meta_name}: {exc}")
+                continue
+            if not isinstance(meta, dict):
+                continue
+            for dep in meta.get("dependencies") or []:
+                dep_name = dep.get("role") or dep.get("name") if isinstance(dep, dict) else dep
+                if isinstance(dep_name, str) and depth < _MAX_INCLUDE_DEPTH:
+                    self._scan_role(dep_name, depth + 1)
 
 
 def scan_playbook(playbook: Path, project_dir: Path | None = None) -> PlaybookScan:

@@ -10,8 +10,12 @@ WATCH_DIRS="${REHEARSE_WATCH_DIRS:-/etc /usr/local /opt /srv /root /home /var/sp
 HASH_MAX_BYTES="${REHEARSE_HASH_MAX_BYTES:-4194304}"
 SELF_DIR="/opt/ansible-rehearse"
 
-begin() { printf '###REHEARSE:BEGIN %s###\n' "$1"; }
-end()   { printf '###REHEARSE:END###\n'; }
+# The nonce makes section markers unforgeable: a crafted filename cannot inject
+# a marker line because it cannot predict the per-snapshot random value.
+NONCE="${REHEARSE_NONCE:-0}"
+
+begin() { printf '###REHEARSE[%s]:BEGIN %s###\n' "$NONCE" "$1"; }
+end()   { printf '###REHEARSE[%s]:END###\n' "$NONCE"; }
 
 # Only our known subdirectories are hidden from the diff; anything else a
 # playbook drops under $SELF_DIR still shows up.
@@ -83,4 +87,4 @@ begin groups
 cat /etc/group 2>/dev/null
 end
 
-printf '###REHEARSE:DONE###\n'
+printf '###REHEARSE[%s]:DONE###\n' "$NONCE"

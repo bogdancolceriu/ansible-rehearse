@@ -15,6 +15,17 @@ def test_detect_no_engine_found(monkeypatch: pytest.MonkeyPatch) -> None:
         ContainerEngine.detect()
 
 
+def test_detect_rejects_binary_in_current_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    # On Windows, which() resolves from the cwd too; a repo shipping its own
+    # docker.exe must never be trusted as the engine.
+    from pathlib import Path
+
+    cwd_binary = str(Path.cwd() / "docker.exe")
+    monkeypatch.setattr("ansible_rehearse.engine.shutil.which", lambda _name: cwd_binary)
+    with pytest.raises(EngineError, match="no container engine found"):
+        ContainerEngine.detect()
+
+
 def test_detect_daemon_not_responding(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "ansible_rehearse.engine.shutil.which", lambda name: f"C:\\fake\\{name}.exe"

@@ -1,5 +1,6 @@
 [build-system]
-requires = ["hatchling"]
+# >=1.27 for PEP 639 license expression / license-files support
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]

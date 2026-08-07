@@ -7,13 +7,12 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
-from rich.markup import escape
 
 from . import __version__
 from .engine import EngineError
 from .images import DEFAULT_DISTRO, DISTROS
 from .playbook import PlaybookError
-from .report import render, render_fidelity_matrix
+from .report import _esc, render, render_fidelity_matrix
 from .runner import ExternalTasksError, RehearseError, RunConfig, rehearse
 
 app = typer.Typer(
@@ -33,6 +32,14 @@ EXIT_PLAY_FAILED = 1
 EXIT_USAGE = 2
 EXIT_EXTERNAL_BLOCKED = 3
 EXIT_ENGINE = 4
+
+
+def _print_error(prefix: str, exc: Exception) -> None:
+    """Print a (possibly multi-line, untrusted) error message, sanitized per line."""
+    lines = str(exc).splitlines() or [""]
+    err_console.print(f"[red]{prefix}:[/red] {_esc(lines[0])}")
+    for line in lines[1:]:
+        err_console.print(f"  {_esc(line)}")
 
 
 def _version_callback(value: bool) -> None:
@@ -106,18 +113,25 @@ def run(
 ) -> None:
     """Rehearse PLAYBOOK in an ephemeral container and print the state diff."""
     if not playbook.is_file():
-        err_console.print(f"[red]error:[/red] playbook not found: {escape(str(playbook))}")
+        err_console.print(f"[red]error:[/red] playbook not found: {_esc(str(playbook))}")
         raise typer.Exit(EXIT_USAGE)
     if distro not in DISTROS:
         err_console.print(
-            f"[red]error:[/red] unknown distro {escape(distro)!s}; "
+            f"[red]error:[/red] unknown distro {_esc(distro)!s}; "
             f"available: {', '.join(sorted(DISTROS))}"
         )
         raise typer.Exit(EXIT_USAGE)
 
     progress = (
-        None if quiet else (lambda msg: err_console.print(f"[dim]rehearse: {escape(msg)}[/dim]"))
+        None if quiet else (lambda msg: err_console.print(f"[dim]rehearse: {_esc(msg)}[/dim]"))
     )
+    if systemd:
+        # Say it BEFORE the (long) run, not only in the final report.
+        err_console.print(
+            "[bold yellow]note:[/bold yellow] --systemd runs a PRIVILEGED container "
+            "sharing host cgroups; kernel-level tasks can affect this machine. "
+            "Rehearse only playbooks you trust."
+        )
     cfg = RunConfig(
         playbook=playbook,
         project_dir=project_dir,
@@ -140,8 +154,7 @@ def run(
         )
         for task, reason in exc.external:
             err_console.print(
-                f"  [red]-[/red] {escape(task.name)} "
-                f"[dim]({escape(task.source)})[/dim]: {escape(reason)}"
+                f"  [red]-[/red] {_esc(task.name)} [dim]({_esc(task.source)})[/dim]: {_esc(reason)}"
             )
         err_console.print(
             "\nRerun with [bold]--allow-external[/bold] only if you are certain "
@@ -149,19 +162,19 @@ def run(
         )
         raise typer.Exit(EXIT_EXTERNAL_BLOCKED) from None
     except EngineError as exc:
-        err_console.print(f"[red]container engine error:[/red] {escape(str(exc))}")
+        _print_error("container engine error", exc)
         raise typer.Exit(EXIT_ENGINE) from None
     except PlaybookError as exc:
-        err_console.print(f"[red]playbook error:[/red] {escape(str(exc))}")
+        _print_error("playbook error", exc)
         raise typer.Exit(EXIT_USAGE) from None
     except RehearseError as exc:
-        err_console.print(f"[red]error:[/red] {escape(str(exc))}")
+        _print_error("error", exc)
         raise typer.Exit(EXIT_USAGE) from None
 
     render(result, console)
     if json_out:
         json_out.write_text(json.dumps(result.to_dict(), indent=2), encoding="utf-8")
-        console.print(f"[dim]JSON written to {escape(str(json_out))}[/dim]")
+        console.print(f"[dim]JSON written to {_esc(str(json_out))}[/dim]")
     if result.play_failed:
         raise typer.Exit(EXIT_PLAY_FAILED)
 

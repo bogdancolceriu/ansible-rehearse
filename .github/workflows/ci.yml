@@ -41,7 +41,7 @@ jobs:
         with:
           python-version: "3.13"
       - run: python -m pip install -e ".[dev]"
-      - run: python -m pytest tests/e2e -m docker -s
+      - run: python -m pytest tests/e2e -m "docker and not systemd" -s
         timeout-minutes: 25
       - run: python -m pytest tests/e2e -m systemd -s
         timeout-minutes: 20

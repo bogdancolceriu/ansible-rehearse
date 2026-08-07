@@ -3,7 +3,7 @@
 [![CI](https://github.com/bogdancolceriu/ansible-rehearse/actions/workflows/ci.yml/badge.svg)](https://github.com/bogdancolceriu/ansible-rehearse/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/ansible-rehearse)](https://pypi.org/project/ansible-rehearse/)
 [![Python](https://img.shields.io/pypi/pyversions/ansible-rehearse)](https://pypi.org/project/ansible-rehearse/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/bogdancolceriu/ansible-rehearse/blob/main/LICENSE)
 
 **Rehearse your Ansible playbook in a throwaway container and see the real state
 diff — packages, files, services, ports, users — before you touch production.**
@@ -13,7 +13,7 @@ might do, `rehearse` **actually runs it** inside an ephemeral container matched 
 your target distro, snapshots the system before and after, and shows you exactly
 what changed.
 
-![rehearse demo](docs/demo.svg)
+![rehearse demo](https://raw.githubusercontent.com/bogdancolceriu/ansible-rehearse/main/docs/demo.svg)
 
 ## Why not just `--check`?
 
@@ -159,7 +159,7 @@ Or bring your own image with `--image`.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports with a failing playbook
+See [CONTRIBUTING.md](https://github.com/bogdancolceriu/ansible-rehearse/blob/main/CONTRIBUTING.md). Bug reports with a failing playbook
 snippet are gold; so are fidelity-matrix corrections from people who know a
 module better than we do.
 

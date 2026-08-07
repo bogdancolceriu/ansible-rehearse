@@ -19,9 +19,9 @@ pip install -e ".[dev]"
 pytest
 
 # End-to-end tests (need a running Docker or Podman daemon; slow on first run)
-pytest -m docker
+pytest -m "docker and not systemd"
 
-# Privileged systemd rehearsal e2e
+# Privileged systemd rehearsal e2e (needs --privileged support)
 pytest -m systemd
 
 # Lint / format

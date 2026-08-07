@@ -47,7 +47,10 @@ _SECTION_TITLES = {
     "groups": "Groups",
 }
 
-_CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+# C0 controls (incl. newline/tab: untrusted strings must stay on one line so
+# they cannot forge plan lines) plus DEL and the C1 range (0x80-0x9f covers
+# 8-bit CSI/OSC sequences some terminals honor).
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 def _esc(value: object) -> str:

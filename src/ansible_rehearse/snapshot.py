@@ -7,9 +7,20 @@ from importlib import resources
 
 from .models import FileEntry, GroupEntry, PortEntry, ServiceEntry, Snapshot, UserEntry
 
-_MARKER_RE = re.compile(r"^###REHEARSE:BEGIN ([a-z.]+)###\r?$", re.M)
-_END_RE = re.compile(r"^###REHEARSE:(?:END|DONE)###\r?$", re.M)
-_DONE_RE = re.compile(r"^###REHEARSE:DONE###\r?$", re.M)
+
+def _marker_patterns(nonce: str) -> tuple[re.Pattern[str], re.Pattern[str], re.Pattern[str]]:
+    """Marker regexes bound to the per-snapshot nonce.
+
+    The nonce (passed to the collector as REHEARSE_NONCE) makes markers
+    unforgeable: file paths embedded in the output cannot inject section
+    boundaries because they cannot contain the unpredictable value.
+    """
+    esc = re.escape(nonce)
+    begin = re.compile(rf"^###REHEARSE\[{esc}\]:BEGIN ([a-z.]+)###\r?$", re.M)
+    end = re.compile(rf"^###REHEARSE\[{esc}\]:(?:END|DONE)###\r?$", re.M)
+    done = re.compile(rf"^###REHEARSE\[{esc}\]:DONE###\r?$", re.M)
+    return begin, end, done
+
 
 # GNU md5sum escapes problematic filenames (\n -> \\n, \\ -> \\\\) and prefixes
 # the whole line with a backslash.
@@ -25,14 +36,15 @@ def collector_script() -> str:
     return resources.files("ansible_rehearse").joinpath("data/collect_state.sh").read_text("utf-8")
 
 
-def split_sections(text: str) -> dict[str, str]:
+def split_sections(text: str, nonce: str = "0") -> dict[str, str]:
     """Split collector output into raw per-section text (markers excluded)."""
+    begin_re, end_re, _ = _marker_patterns(nonce)
     sections: dict[str, str] = {}
-    for match in _MARKER_RE.finditer(text):
+    for match in begin_re.finditer(text):
         start = match.end()
         if start < len(text) and text[start] == "\n":
             start += 1
-        end_match = _END_RE.search(text, start)
+        end_match = end_re.search(text, start)
         end = end_match.start() if end_match else len(text)
         sections[match.group(1)] = text[start:end]
     return sections
@@ -195,14 +207,15 @@ def _parse_groups(raw: str) -> dict[str, GroupEntry]:
     return groups
 
 
-def parse_snapshot(text: str) -> Snapshot:
-    sections = split_sections(text)
+def parse_snapshot(text: str, nonce: str = "0") -> Snapshot:
+    sections = split_sections(text, nonce)
     if "meta" not in sections:
         raise SnapshotError(
             "collector output is missing the meta section - "
             "the state script probably failed inside the container"
         )
-    if not _DONE_RE.search(text):
+    _, _, done_re = _marker_patterns(nonce)
+    if not done_re.search(text):
         raise SnapshotError(
             "collector output is missing the DONE marker - "
             "the state script was interrupted before finishing"

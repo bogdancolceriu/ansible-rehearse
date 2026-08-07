@@ -10,6 +10,7 @@ output contains only synthetic demo data.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -22,8 +23,11 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def main() -> int:
+    # Run from the repo root with a relative path, so the captured header shows
+    # "examples/webserver.yml" instead of the author's absolute local path.
+    os.chdir(ROOT)
     cfg = RunConfig(
-        playbook=ROOT / "examples" / "webserver.yml",
+        playbook=Path("examples") / "webserver.yml",
         distro="ubuntu22",
         systemd=True,
     )

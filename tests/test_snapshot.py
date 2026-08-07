@@ -25,40 +25,40 @@ _FILE_RECORDS = "\0".join(
 
 DPKG_OUTPUT = (
     """\
-###REHEARSE:BEGIN meta###
+###REHEARSE[0]:BEGIN meta###
 format=2
-###REHEARSE:END###
-###REHEARSE:BEGIN packages.dpkg###
+###REHEARSE[0]:END###
+###REHEARSE[0]:BEGIN packages.dpkg###
 adduser\t3.118ubuntu5
 base-files\t12ubuntu4.7
 nginx\t1.18.0-6ubuntu14.6
-###REHEARSE:END###
-###REHEARSE:BEGIN files###
+###REHEARSE[0]:END###
+###REHEARSE[0]:BEGIN files###
 """
     + _FILE_RECORDS
     + """
-###REHEARSE:END###
-###REHEARSE:BEGIN hashes###
+###REHEARSE[0]:END###
+###REHEARSE[0]:BEGIN hashes###
 d41d8cd98f00b204e9800998ecf8427e  /etc/passwd
 0123456789abcdef0123456789abcdef  /etc/pipe|name.conf
 \\fedcba9876543210fedcba9876543210  /etc/weird\\nname.conf
-###REHEARSE:END###
-###REHEARSE:BEGIN services.unavailable###
-###REHEARSE:END###
-###REHEARSE:BEGIN ports###
+###REHEARSE[0]:END###
+###REHEARSE[0]:BEGIN services.unavailable###
+###REHEARSE[0]:END###
+###REHEARSE[0]:BEGIN ports###
 tcp   LISTEN 0      511          0.0.0.0:80        0.0.0.0:*    users:(("nginx",pid=123,fd=6))
 tcp   LISTEN 0      128          [::]:22           [::]:*
 udp   UNCONN 0      0            127.0.0.53%lo:53  0.0.0.0:*
-###REHEARSE:END###
-###REHEARSE:BEGIN users###
+###REHEARSE[0]:END###
+###REHEARSE[0]:BEGIN users###
 root:x:0:0:root:/root:/bin/bash
 daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
-###REHEARSE:END###
-###REHEARSE:BEGIN groups###
+###REHEARSE[0]:END###
+###REHEARSE[0]:BEGIN groups###
 root:x:0:
 sudo:x:27:alice,bob
-###REHEARSE:END###
-###REHEARSE:DONE###
+###REHEARSE[0]:END###
+###REHEARSE[0]:DONE###
 """
 )
 
@@ -120,28 +120,28 @@ def test_parse_users_groups() -> None:
 
 
 RPM_WITH_SYSTEMD = """\
-###REHEARSE:BEGIN meta###
+###REHEARSE[0]:BEGIN meta###
 format=2
-###REHEARSE:END###
-###REHEARSE:BEGIN packages.rpm###
+###REHEARSE[0]:END###
+###REHEARSE[0]:BEGIN packages.rpm###
 bash\t5.1.8-9.el9
 systemd\t252-46.el9
-###REHEARSE:END###
-###REHEARSE:BEGIN services.unitfiles###
+###REHEARSE[0]:END###
+###REHEARSE[0]:BEGIN services.unitfiles###
 sshd.service enabled enabled
 nginx.service disabled disabled
 getty@.service enabled enabled
-###REHEARSE:END###
-###REHEARSE:BEGIN services.running###
+###REHEARSE[0]:END###
+###REHEARSE[0]:BEGIN services.running###
 sshd.service loaded active running OpenSSH server daemon
-###REHEARSE:END###
-###REHEARSE:BEGIN users###
+###REHEARSE[0]:END###
+###REHEARSE[0]:BEGIN users###
 root:x:0:0:root:/root:/bin/bash
-###REHEARSE:END###
-###REHEARSE:BEGIN groups###
+###REHEARSE[0]:END###
+###REHEARSE[0]:BEGIN groups###
 root:x:0:
-###REHEARSE:END###
-###REHEARSE:DONE###
+###REHEARSE[0]:END###
+###REHEARSE[0]:DONE###
 """
 
 
@@ -165,7 +165,7 @@ def test_missing_meta_raises() -> None:
 
 
 def test_truncated_stream_raises() -> None:
-    truncated = DPKG_OUTPUT.split("###REHEARSE:DONE###")[0]
+    truncated = DPKG_OUTPUT.split("###REHEARSE[0]:DONE###")[0]
     with pytest.raises(SnapshotError, match="DONE"):
         parse_snapshot(truncated)
 
@@ -177,8 +177,31 @@ def test_crlf_tolerated() -> None:
     assert snap.packages["bash"] == "5.1.8-9.el9"
 
 
+def test_forged_markers_without_the_nonce_are_inert() -> None:
+    # A crafted filename embedding marker-looking lines cannot terminate or
+    # inject sections, because real markers carry an unpredictable nonce.
+    nonce = "a1b2c3d4e5f6a7b8"
+    evil_record = (
+        "f|0644|root|root|5|1700000009.0|/etc/evil\n###REHEARSE[0]:END###\n"
+        "###REHEARSE[0]:BEGIN packages.dpkg###\nfakepkg\t9.9"
+    )
+    text = (
+        f"###REHEARSE[{nonce}]:BEGIN meta###\nformat=2\n###REHEARSE[{nonce}]:END###\n"
+        f"###REHEARSE[{nonce}]:BEGIN files###\n" + evil_record + "\0\n"
+        f"###REHEARSE[{nonce}]:END###\n"
+        f"###REHEARSE[{nonce}]:DONE###\n"
+    )
+    snap = parse_snapshot(text, nonce=nonce)
+    # The forged package section never materializes...
+    assert snap.packages == {}
+    # ...and the hostile path is recorded as ONE file entry, markers included.
+    assert any(path.startswith("/etc/evil") for path in snap.files)
+
+
 def test_split_sections_ignores_text_outside_sections() -> None:
-    text = "noise before\n###REHEARSE:BEGIN meta###\nformat=2\n###REHEARSE:END###\nnoise after\n"
+    text = (
+        "noise before\n###REHEARSE[0]:BEGIN meta###\nformat=2\n###REHEARSE[0]:END###\nnoise after\n"
+    )
     sections = split_sections(text)
     assert list(sections) == ["meta"]
     assert sections["meta"].strip() == "format=2"
@@ -187,7 +210,9 @@ def test_split_sections_ignores_text_outside_sections() -> None:
 def test_collector_script_ships_with_package() -> None:
     script = collector_script()
     assert script.startswith("#!/bin/sh")
-    assert "###REHEARSE:BEGIN" in script
+    # Markers carry the per-snapshot nonce (REHEARSE_NONCE), default "0".
+    assert "###REHEARSE[%s]:BEGIN" in script
+    assert 'NONCE="${REHEARSE_NONCE:-0}"' in script
     # Held packages must still count as installed (dpkg_selections: hold).
     assert "'^[hi]i'" in script
     # Only known workspace subdirs are pruned, and no bashisms.

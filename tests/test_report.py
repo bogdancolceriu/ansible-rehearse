@@ -89,7 +89,8 @@ def test_render_empty_diff() -> None:
 
 
 def test_ansi_escapes_in_task_names_are_neutralized() -> None:
-    hostile = "\x1b[2J\x1b[31mfake-clean-screen\x07"
+    # C0 ESC sequences, BEL, 8-bit C1 CSI, and newlines (line forgery) alike.
+    hostile = "\x1b[2J\x1b[31mfake-clean-screen\x07\x9b31m\nPlan: 99 to add"
     result = _result(
         tasks=[
             TaskRecord(
@@ -105,7 +106,10 @@ def test_ansi_escapes_in_task_names_are_neutralized() -> None:
     text = _render_to_text(result)
     assert "\x1b" not in text  # no raw ESC may survive into the output
     assert "\x07" not in text
+    assert "\x9b" not in text  # 8-bit C1 CSI neutralized too
     assert "fake-clean-screen" in text
+    # the injected newline cannot start a forged plan line
+    assert "\nPlan: 99 to add" not in text
 
 
 def test_failed_play_summary_is_labeled_partial() -> None:

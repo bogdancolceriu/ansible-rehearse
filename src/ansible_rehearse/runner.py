@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from .engine import ContainerEngine, EngineTimeout
 from .fidelity import FIDELITY_NEEDS_SYSTEMD, classify
 from .images import DEFAULT_DISTRO, DISTROS, SELF_DIR, cache_tag, prepare_script
@@ -99,6 +101,24 @@ def callback_plugin_source() -> str:
     from importlib import resources
 
     return resources.files("ansible_rehearse").joinpath("data/rehearse_jsonl.py").read_text("utf-8")
+
+
+def _galaxy_subcommands(requirements_text: str) -> list[list[str]]:
+    """Decide which ansible-galaxy invocations a requirements.yml actually needs."""
+    try:
+        data = yaml.safe_load(requirements_text)
+    except yaml.YAMLError:
+        return []
+    if isinstance(data, list):
+        # Legacy format: a bare list of roles.
+        return [["install", "-r"]]
+    subcommands: list[list[str]] = []
+    if isinstance(data, dict):
+        if data.get("roles"):
+            subcommands.append(["install", "-r"])
+        if data.get("collections"):
+            subcommands.append(["collection", "install", "-r"])
+    return subcommands
 
 
 def _annotate_fidelity(records: list[TaskRecord], systemd: bool) -> None:
@@ -207,33 +227,44 @@ def rehearse(
 
         requirements = project_dir / "requirements.yml"
         if requirements.is_file():
-            say("installing Galaxy requirements")
-            warnings.append(
-                "requirements.yml content is installed at runtime and is NOT scanned "
-                "by the external-effect gate - review third-party roles yourself"
-            )
+            subcommands = _galaxy_subcommands(requirements.read_text("utf-8"))
+            if subcommands:
+                say("installing Galaxy requirements")
+                warnings.append(
+                    "requirements.yml content is installed at runtime and is NOT scanned "
+                    "by the external-effect gate - review third-party roles yourself"
+                )
             galaxy = f"{SELF_DIR}/venv/bin/ansible-galaxy"
             req_path = f"{SELF_DIR}/project/requirements.yml"
-            for sub in (["collection", "install", "-r", req_path], ["install", "-r", req_path]):
+            for sub in subcommands:
                 proc = engine.exec(
-                    name, [galaxy, *sub], env=_ANSIBLE_ENV, check=False, timeout=_PREPARE_TIMEOUT
+                    name,
+                    [galaxy, *sub, req_path],
+                    env=_ANSIBLE_ENV,
+                    check=False,
+                    timeout=_PREPARE_TIMEOUT,
                 )
                 if proc.returncode != 0:
                     warnings.append(f"ansible-galaxy {sub[0]} failed: {proc.stderr.strip()[:200]}")
 
-        snapshot_env = {}
+        watch_env = {}
         if cfg.extra_watch:
             defaults = "/etc /usr/local /opt /srv /root /home /var/spool/cron /var/www"
-            snapshot_env["REHEARSE_WATCH_DIRS"] = defaults + " " + " ".join(cfg.extra_watch)
+            watch_env["REHEARSE_WATCH_DIRS"] = defaults + " " + " ".join(cfg.extra_watch)
 
-        # The collector is piped over stdin on every use: there is no on-disk
-        # copy a playbook could tamper with between the two snapshots.
+        # The collector is piped over stdin on every use (no on-disk copy a
+        # playbook could tamper with) and each snapshot gets a fresh random
+        # nonce so section markers cannot be forged by crafted filenames.
         say("taking the before snapshot")
+        before_nonce = secrets.token_hex(8)
         before_proc = engine.exec_script(
-            name, collector_script(), env=snapshot_env, timeout=_SNAPSHOT_TIMEOUT
+            name,
+            collector_script(),
+            env={**watch_env, "REHEARSE_NONCE": before_nonce},
+            timeout=_SNAPSHOT_TIMEOUT,
         )
         try:
-            before = parse_snapshot(before_proc.stdout)
+            before = parse_snapshot(before_proc.stdout, nonce=before_nonce)
         except SnapshotError as exc:
             raise RehearseError(f"could not parse the before snapshot: {exc}") from exc
 
@@ -277,21 +308,30 @@ def rehearse(
                 f"ansible-playbook exceeded the {_PLAY_TIMEOUT}s timeout and was "
                 "aborted; the diff reflects whatever ran until then"
             )
+            # The docker-exec timeout only kills the CLIENT; the playbook keeps
+            # running in the container and would race the after-snapshot.
+            engine.exec(name, ["pkill", "-9", "-f", "ansible-playbook"], check=False, timeout=30)
         tasks, stats = parse_play_events(play_stdout)
         if not tasks and play_rc != 0 and not play_timed_out:
             stderr_tail = play_stderr.strip().splitlines()[-15:]
+            detail = "\n".join(stderr_tail)
+            if warnings:
+                detail += "\n\nwarnings so far:\n" + "\n".join(f"- {w}" for w in warnings)
             raise RehearseError(
-                "ansible-playbook failed before producing task results "
-                f"(rc={play_rc}):\n" + "\n".join(stderr_tail)
+                f"ansible-playbook failed before producing task results (rc={play_rc}):\n{detail}"
             )
         _annotate_fidelity(tasks, cfg.systemd)
 
         say("taking the after snapshot")
+        after_nonce = secrets.token_hex(8)
         after_proc = engine.exec_script(
-            name, collector_script(), env=snapshot_env, timeout=_SNAPSHOT_TIMEOUT
+            name,
+            collector_script(),
+            env={**watch_env, "REHEARSE_NONCE": after_nonce},
+            timeout=_SNAPSHOT_TIMEOUT,
         )
         try:
-            after = parse_snapshot(after_proc.stdout)
+            after = parse_snapshot(after_proc.stdout, nonce=after_nonce)
         except SnapshotError as exc:
             raise RehearseError(f"could not parse the after snapshot: {exc}") from exc
 

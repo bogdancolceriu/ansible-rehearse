@@ -43,6 +43,11 @@ class ContainerEngine:
             path = shutil.which(candidate)
             if not path:
                 continue
+            # On Windows, which() also resolves binaries from the CURRENT
+            # directory - never trust an engine binary sitting in the cwd
+            # (a malicious repo could ship its own docker.exe).
+            if Path(path).resolve().parent == Path.cwd().resolve():
+                continue
             engine = cls(path)
             # Plain `info` works for both docker and podman (podman has no
             # .ServerVersion template field); rc 0 means the engine is usable.
