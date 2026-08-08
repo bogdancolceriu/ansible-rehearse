@@ -138,6 +138,32 @@ def test_rocky9_rpm_family(tmp_path: Path) -> None:
     assert "/etc/rehearse-rocky.conf" in {c.item for c in result.diff.files if c.action == "added"}
 
 
+@pytest.mark.skipif(not _engine_available(), reason="no container engine on PATH")
+def test_fedora44_rpm_family(tmp_path: Path) -> None:
+    (tmp_path / "fedora.yml").write_text(
+        """\
+---
+- hosts: all
+  become: true
+  tasks:
+    - name: Install zip
+      ansible.builtin.package:
+        name: zip
+        state: present
+    - name: Drop a file
+      ansible.builtin.copy:
+        dest: /etc/rehearse-fedora.conf
+        content: "rpm-fedora\\n"
+""",
+        encoding="utf-8",
+    )
+    cfg = RunConfig(playbook=tmp_path / "fedora.yml", distro="fedora44")
+    result = rehearse(cfg, progress=print)
+    assert result.play_rc == 0, [t.msg for t in result.tasks if t.failed]
+    assert "zip" in {c.item for c in result.diff.packages if c.action == "added"}
+    assert "/etc/rehearse-fedora.conf" in {c.item for c in result.diff.files if c.action == "added"}
+
+
 @pytest.mark.systemd
 @pytest.mark.skipif(not _engine_available(), reason="no container engine on PATH")
 def test_systemd_service_rehearsal(tmp_path: Path) -> None:
