@@ -264,7 +264,7 @@ def test_proc_net_fallback_converts_captured_lines(tmp_path) -> None:
     end = script.index("if command -v ss", start)
     fallback = script[start:end]
     proc = subprocess.run(
-        [shell, "-c", fallback + "\n_emit_proc_net_ports \"$1\"", "collector", str(proc_net)],
+        [shell, "-c", fallback + '\n_emit_proc_net_ports "$1"', "collector", str(proc_net)],
         capture_output=True,
         text=True,
         check=True,
