@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+
 import pytest
 
 from ansible_rehearse.snapshot import (
@@ -218,3 +221,58 @@ def test_collector_script_ships_with_package() -> None:
     # Only known workspace subdirs are pruned, and no bashisms.
     assert '"$SELF_DIR/venv"' in script
     assert "[[" not in script
+
+
+def test_proc_net_fallback_converts_captured_lines(tmp_path) -> None:
+    shell = shutil.which("sh")
+    if shell is None:
+        pytest.skip("POSIX sh is not available")
+
+    proc_net = tmp_path / "proc" / "net"
+    proc_net.mkdir(parents=True)
+    (proc_net / "tcp").write_text(
+        "  sl  local_address rem_address   st\n"
+        "   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 "
+        "00:00000000 00000000   100        0 12345 1\n"
+        "   1: 0100007F:162E 00000000:0000 01 00000000:00000000 "
+        "00:00000000 00000000   100        0 12346 1\n",
+        encoding="ascii",
+    )
+    (proc_net / "tcp6").write_text(
+        "  sl  local_address rem_address   st\n"
+        "   0: 00000000000000000000000000000000:0016 "
+        "00000000000000000000000000000000:0000 0A 00000000:00000000 "
+        "00:00000000 00000000   100        0 12347 1\n",
+        encoding="ascii",
+    )
+    (proc_net / "udp").write_text(
+        "  sl  local_address rem_address   st\n"
+        "   0: 00000000:0035 00000000:0000 07 00000000:00000000 "
+        "00:00000000 00000000   100        0 12348 1\n",
+        encoding="ascii",
+    )
+    (proc_net / "udp6").write_text(
+        "  sl  local_address rem_address   st\n"
+        "   0: 00000000000000000000000001000000:0035 "
+        "00000000000000000000000000000000:0000 07 00000000:00000000 "
+        "00:00000000 00000000   100        0 12349 1\n",
+        encoding="ascii",
+    )
+
+    script = collector_script()
+    start = script.index("_hex_value() {")
+    end = script.index("if command -v ss", start)
+    fallback = script[start:end]
+    proc = subprocess.run(
+        [shell, "-c", fallback + '\n_emit_proc_net_ports "$1"', "collector", str(proc_net)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    lines = proc.stdout.splitlines()
+    assert "tcp LISTEN 0 0 127.0.0.1:8080 0.0.0.0:*" in lines
+    assert not any(":5678" in line for line in lines)
+    assert "tcp6 LISTEN 0 0 [0000:0000:0000:0000:0000:0000:0000:0000]:22 [::]:*" in lines
+    assert "udp UNCONN 0 0 0.0.0.0:53 0.0.0.0:*" in lines
+    assert "udp6 UNCONN 0 0 [0000:0000:0000:0000:0000:0000:0000:0001]:53 [::]:*" in lines

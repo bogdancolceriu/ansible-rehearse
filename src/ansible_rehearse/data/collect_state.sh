@@ -73,9 +73,109 @@ else
     end
 fi
 
+# `/proc/net` stores IPv4 addresses as little-endian hex and IPv6 addresses as
+# four little-endian 32-bit words.  Keep this fallback in POSIX sh so minimal
+# rehearsal images do not need iproute2 just to collect listening ports.
+_hex_value() {
+    printf '%d' "0x$1"
+}
+
+_ipv4_from_proc() {
+    value="$1"
+    first="${value%??????}"
+    rest="${value#??}"
+    second="${rest%????}"
+    rest="${rest#??}"
+    third="${rest%??}"
+    fourth="${rest#??}"
+    printf '%d.%d.%d.%d' \
+        "$(_hex_value "$fourth")" "$(_hex_value "$third")" \
+        "$(_hex_value "$second")" "$(_hex_value "$first")"
+}
+
+_reverse_proc_word() {
+    word="$1"
+    first="${word%??????}"
+    rest="${word#??}"
+    second="${rest%????}"
+    rest="${rest#??}"
+    third="${rest%??}"
+    fourth="${rest#??}"
+    printf '%s%s%s%s' "$fourth" "$third" "$second" "$first"
+}
+
+_ipv6_from_proc() {
+    value="$1"
+    word1="$(printf '%s' "$value" | cut -c 1-8)"
+    word2="$(printf '%s' "$value" | cut -c 9-16)"
+    word3="$(printf '%s' "$value" | cut -c 17-24)"
+    word4="$(printf '%s' "$value" | cut -c 25-32)"
+    reversed1="$(_reverse_proc_word "$word1")"
+    reversed2="$(_reverse_proc_word "$word2")"
+    reversed3="$(_reverse_proc_word "$word3")"
+    reversed4="$(_reverse_proc_word "$word4")"
+    printf '[%s:%s:%s:%s:%s:%s:%s:%s]' \
+        "${reversed1%????}" "${reversed1#????}" \
+        "${reversed2%????}" "${reversed2#????}" \
+        "${reversed3%????}" "${reversed3#????}" \
+        "${reversed4%????}" "${reversed4#????}"
+}
+
+_emit_proc_net_file() {
+    proto="$1"
+    path="$2"
+    [ -r "$path" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        [ -n "$line" ] || continue
+        set -- $line
+        [ "$#" -ge 4 ] || continue
+        [ "$1" = sl ] && continue
+        local_field="$2"
+        address="${local_field%:*}"
+        port_hex="${local_field#*:}"
+        state="$4"
+        case "$proto" in
+            tcp|tcp6)
+                [ "$state" = 0A ] || continue
+                status=LISTEN
+                ;;
+            udp|udp6)
+                status=UNCONN
+                ;;
+            *)
+                continue
+                ;;
+        esac
+        port="$(_hex_value "$port_hex")"
+        case "$proto" in
+            tcp6|udp6)
+                address="$(_ipv6_from_proc "$address")"
+                remote='[::]:*'
+                ;;
+            *)
+                address="$(_ipv4_from_proc "$address")"
+                remote='0.0.0.0:*'
+                ;;
+        esac
+        printf '%s %s 0 0 %s:%s %s\n' "$proto" "$status" "$address" "$port" "$remote"
+    done < "$path"
+}
+
+_emit_proc_net_ports() {
+    root="$1"
+    _emit_proc_net_file tcp "$root/tcp"
+    _emit_proc_net_file tcp6 "$root/tcp6"
+    _emit_proc_net_file udp "$root/udp"
+    _emit_proc_net_file udp6 "$root/udp6"
+}
+
 if command -v ss >/dev/null 2>&1; then
     begin ports
     ss -tulnpH 2>/dev/null || ss -tulnH 2>/dev/null
+    end
+else
+    begin ports
+    _emit_proc_net_ports "${REHEARSE_PROC_NET_ROOT:-/proc/net}"
     end
 fi
 
