@@ -144,6 +144,7 @@ right now, before I run it for real?"* — with zero test code.
 | `ubuntu24` | `ubuntu:24.04` | `geerlingguy/docker-ubuntu2404-ansible` |
 | `debian12` | `debian:12` | `geerlingguy/docker-debian12-ansible` |
 | `rocky9` | `rockylinux:9` | `geerlingguy/docker-rockylinux9-ansible` |
+| `fedora44` | `fedora:44` | `geerlingguy/docker-fedora44-ansible` |
 
 Or bring your own image with `--image`.
 

@@ -59,6 +59,15 @@ DISTROS: dict[str, DistroSpec] = {
         ansible_pin="ansible-core>=2.18,<2.19",
         notes="controller venv uses python3.12 (system python3 is 3.9)",
     ),
+    "fedora44": DistroSpec(
+        key="fedora44",
+        family="rpm",
+        plain_image="docker.io/library/fedora:44",
+        systemd_image="docker.io/geerlingguy/docker-fedora44-ansible:latest",
+        venv_python="python3",
+        ansible_pin="ansible-core>=2.20,<2.21",
+        notes="python3.14 -> ansible-core 2.20",
+    ),
 }
 
 DEFAULT_DISTRO = "ubuntu22"
