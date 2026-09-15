@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.1 (2026-09-15)
+
+First release with outside contributions. Thanks to @breezeFur and @deepunyk.
+
+- New distro profile: `fedora44` (Fedora 44, rpm family), with an end-to-end
+  test alongside the existing rocky9 one. Contributed by @deepunyk in #8.
+- Listening ports are now collected from `/proc/net` when `ss` is not present,
+  so minimal images no longer need iproute2 just for the port snapshot. IPv4
+  and IPv6 addresses are decoded from the kernel's little-endian hex form and
+  only TCP sockets in state `0A` (LISTEN) are reported. The existing `ss` path
+  is unchanged. Contributed by @breezeFur in #7.
+
 ## 0.1.0 (2026-08-07)
 
 Initial release.

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ansible-rehearse"
-version = "0.1.0"
+version = "0.1.1"
 description = "Rehearse Ansible playbooks in a throwaway container and see the real state diff - packages, files, services, ports - before you touch production."
 readme = "README.md"
 license = "MIT"
